@@ -64,25 +64,117 @@ export class NeuralNetworkEngine {
     }
 
     private heuristicEvaluation(position: Position): number {
-        // Simple heuristic: Pip count difference + Contact
+        // Expert Heuristic Evaluation
+        // Positive score favors White, Negative score favors Black
+
+        let score = 0;
+
+        // 1. Pip Count (Race) - Weight: 1.0
+        // Lower is better. 
         let pipWhite = 0;
         let pipBlack = 0;
 
+        // 2. Board Structure & Primes - Weight: 0.5 per point in prime
+        let primeWhite = 0;
+        let primeBlack = 0;
+
+        // 3. Blot Safety (Vulnerability) - Weight: -0.8 per blot
+        let blotsWhite = 0;
+        let blotsBlack = 0;
+
+        // 4. Anchors (Defense) - Weight: 0.6 per anchor in opponent home
+        let anchorsWhite = 0;
+        let anchorsBlack = 0;
+
         for (let i = 0; i < 24; i++) {
             const count = position.board[i];
+
+            // Pip Count Calculation
             if (count > 0) pipWhite += count * (24 - i);
             if (count < 0) pipBlack += Math.abs(count) * (i + 1);
+
+            // Blot Detection (Single checker vulnerability)
+            // Penalty is higher in home board
+            if (count === 1) {
+                // White blot
+                const penalty = i > 17 ? 1.5 : 0.8; // Higher penalty in home board (18-23)
+                blotsWhite += penalty;
+            }
+            if (count === -1) {
+                // Black blot
+                const penalty = i < 6 ? 1.5 : 0.8; // Higher penalty in home board (0-5)
+                blotsBlack += penalty;
+            }
+
+            // Anchor Detection (2+ checkers in opponent's home board)
+            if (count >= 2 && i < 6) {
+                // White anchor in Black's home
+                anchorsWhite += 1;
+            }
+            if (count <= -2 && i > 17) {
+                // Black anchor in White's home
+                anchorsBlack += 1;
+            }
         }
 
-        const pipScore = (pipBlack - pipWhite) / 100;
+        // Prime Detection (Consecutive points with 2+ checkers)
+        // We scan for blocks of length 2 to 6
+        primeWhite = this.calculatePrimeScore(position.board, 1);
+        primeBlack = this.calculatePrimeScore(position.board, -1);
 
-        // Bonus for hitting (opponent on bar)
-        const hitBonus = (position.bar.black - position.bar.white) * 0.5;
+        // --- Scoring ---
 
-        // Bonus for bearing off
-        const offBonus = (position.borneOff.white - position.borneOff.black) * 0.2;
+        // 1. Race Score (Normalized)
+        // 100 pips diff = 1.0 score
+        score += (pipBlack - pipWhite) / 100.0;
 
-        return pipScore + hitBonus + offBonus;
+        // 2. Prime Score
+        score += (primeWhite - primeBlack) * 0.2;
+
+        // 3. Blot Penalty (Negative impact)
+        score -= (blotsWhite * 0.15); // Penalize White blots
+        score += (blotsBlack * 0.15); // Penalize Black blots (add to score because Black wants negative)
+
+        // 4. Anchor Bonus
+        score += (anchorsWhite * 0.25);
+        score -= (anchorsBlack * 0.25);
+
+        // 5. Hit Bonus (Opponent on bar)
+        score += (position.bar.black * 0.6); // Black on bar is good for White
+        score -= (position.bar.white * 0.6); // White on bar is good for Black
+
+        // 6. Bear Off Bonus
+        score += (position.borneOff.white * 0.3);
+        score -= (position.borneOff.black * 0.3);
+
+        return score;
+    }
+
+    private calculatePrimeScore(board: number[], playerSign: number): number {
+        let maxPrimeLength = 0;
+        let currentRun = 0;
+        let primeScore = 0;
+
+        for (let i = 0; i < 24; i++) {
+            const count = board[i];
+            const isPointMade = (playerSign === 1 && count >= 2) || (playerSign === -1 && count <= -2);
+
+            if (isPointMade) {
+                currentRun++;
+            } else {
+                if (currentRun > 0) {
+                    // Reward longer primes exponentially
+                    // 2 pts = 0.2, 3 pts = 0.5, 4 pts = 1.0, 5 pts = 2.0, 6 pts = 4.0
+                    if (currentRun >= 2) primeScore += Math.pow(1.5, currentRun - 1);
+                    maxPrimeLength = Math.max(maxPrimeLength, currentRun);
+                }
+                currentRun = 0;
+            }
+        }
+        // Capture last run
+        if (currentRun >= 2) primeScore += Math.pow(1.5, currentRun - 1);
+
+        return primeScore;
     }
 
     private findBestMoves(position: Position): Move[] {

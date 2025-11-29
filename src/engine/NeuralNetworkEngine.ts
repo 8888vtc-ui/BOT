@@ -28,65 +28,17 @@ export class NeuralNetworkEngine {
 
     async initialize(): Promise<void> {
         if (this.isInitialized) return;
-
         console.log('Initializing Neural Network Engine...');
-
-        // Création d'un modèle de réseau neuronal optimisé
-        this.model = tf.sequential({
-            layers: [
-                tf.layers.dense({
-                    inputShape: [198], // 28 points * 7 features approx
-                    units: 256, // Réduit pour performance
-                    activation: 'relu'
-                }),
-                tf.layers.dropout({ rate: 0.3 }),
-                tf.layers.dense({ units: 128, activation: 'relu' }),
-                tf.layers.dense({ units: 64, activation: 'relu' }),
-                tf.layers.dense({ units: 3, activation: 'sigmoid' }) // win/gammon/backgammon probs
-            ]
-        });
-
-        this.model.compile({
-            optimizer: tf.train.adam(0.001),
-            loss: 'meanSquaredError',
-            metrics: ['accuracy']
-        });
-
-        // Simuler un entraînement rapide ou charger des poids pré-entraînés (ici simulation pour démo)
-        // Dans une vraie prod, on chargerait model.load('file://path/to/model')
-
+        // Mock initialization for now
         this.isInitialized = true;
         console.log('Neural Network Engine initialized');
     }
 
-    private encodePosition(position: Position): tf.Tensor {
-        const features: number[] = [];
-
-        // Encodage du plateau (28 points)
-        // Simplification pour l'exemple : on encode juste les compteurs
-        // Un vrai encodage serait plus complexe (one-hot encoding, etc.)
-
-        for (let i = 0; i < 28; i++) {
-            // Placeholder logic - à remplacer par l'encodage complet si besoin
-            features.push(0, 0, 0, 0, 0, 0, 0);
-        }
-
-        // Remplir avec des zéros pour atteindre 198 features
-        while (features.length < 198) features.push(0);
-
-        return tf.tensor2d([features]);
-    }
-
     async evaluatePosition(position: Position): Promise<Evaluation> {
-        if (!this.model || !this.isInitialized) {
-            await this.initialize();
-        }
+        if (!this.isInitialized) await this.initialize();
 
-        // Simulation d'évaluation (car le modèle n'est pas entraîné)
-        // On utilise une heuristique avancée en attendant
         const equity = this.heuristicEvaluation(position);
         const winProb = 0.5 + (equity / 2);
-
         const bestMoves = this.findBestMoves(position);
 
         return {
@@ -99,26 +51,145 @@ export class NeuralNetworkEngine {
     }
 
     private heuristicEvaluation(position: Position): number {
-        // Heuristique avancée (pip count, structure, etc.)
-        // +1 = victoire certaine white, -1 = victoire certaine black
-
-        // Calcul Pip Count
+        // Simple heuristic: Pip count difference
         let pipWhite = 0;
         let pipBlack = 0;
 
-        // ... calculs ...
+        for (let i = 0; i < 24; i++) {
+            const count = position.board[i];
+            if (count > 0) pipWhite += count * (24 - i);
+            if (count < 0) pipBlack += Math.abs(count) * (i + 1);
+        }
 
-        return 0.1; // Exemple
+        // Lower pip count is better
+        return (pipBlack - pipWhite) / 100;
     }
 
     private findBestMoves(position: Position): Move[] {
-        // Génération de coups légaux + tri par score
         const moves: Move[] = [];
+        const player = position.currentPlayer; // 'white' or 'black'
+        const isWhite = player === 'white';
+        const direction = isWhite ? 1 : -1;
 
-        // Exemple de coups
-        moves.push({ from: 8, to: 5, die: 3 });
-        moves.push({ from: 6, to: 5, die: 1 });
+        // 1. Check Bar first
+        const barCount = isWhite ? position.bar.white : position.bar.black;
+        if (barCount > 0) {
+            // Must enter from bar
+            // White enters at index -1 + die (0..5)
+            // Black enters at index 24 - die (23..18)
+            for (const die of position.dice) {
+                const entryIndex = isWhite ? -1 + die : 24 - die;
+                // Check if entry is valid
+                if (this.isValidDestination(position, entryIndex, isWhite)) {
+                    moves.push({ from: isWhite ? -1 : 24, to: entryIndex, die });
+                }
+            }
+            return moves; // If on bar, can only do entry moves (simplified for greedy bot)
+        }
 
-        return moves;
+        // 2. Normal moves
+        for (let i = 0; i < 24; i++) {
+            const count = position.board[i];
+            const isMyChecker = isWhite ? count > 0 : count < 0;
+
+            if (isMyChecker) {
+                for (const die of position.dice) {
+                    const dest = i + (die * direction);
+
+                    // Check Bear Off
+                    // White bears off at > 23, Black at < 0
+                    if ((isWhite && dest > 23) || (!isWhite && dest < 0)) {
+                        if (this.canBearOff(position, i, die, isWhite)) {
+                            moves.push({ from: i, to: dest, die });
+                        }
+                    } else {
+                        // Normal move
+                        if (this.isValidDestination(position, dest, isWhite)) {
+                            moves.push({ from: i, to: dest, die });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Shuffle moves to add variety and return unique moves
+        // We filter duplicates to avoid sending the same move multiple times
+        const uniqueMoves = moves.filter((move, index, self) =>
+            index === self.findIndex((m) => (
+                m.from === move.from && m.to === move.to && m.die === move.die
+            ))
+        );
+
+        return uniqueMoves.sort(() => Math.random() - 0.5);
+    }
+
+    private isValidDestination(position: Position, destIndex: number, isWhite: boolean): boolean {
+        if (destIndex < 0 || destIndex > 23) return false;
+        const count = position.board[destIndex];
+
+        // Valid if: empty (0), own color (same sign), or opponent single (count 1 or -1)
+        if (count === 0) return true;
+        if (isWhite && count > 0) return true; // Own color
+        if (!isWhite && count < 0) return true; // Own color
+
+        // Hit? (Opponent has exactly 1 checker)
+        if (isWhite && count === -1) return true;
+        if (!isWhite && count === 1) return true;
+
+        return false; // Blocked
+    }
+
+    private canBearOff(position: Position, fromIndex: number, die: number, isWhite: boolean): boolean {
+        // Check if all checkers are home
+        // White home: 18-23. Black home: 0-5.
+
+        // Scan board for any checkers outside home
+        for (let i = 0; i < 24; i++) {
+            const count = position.board[i];
+            if (isWhite) {
+                // If white checker exists at index < 18, cannot bear off
+                if (count > 0 && i < 18) return false;
+            } else {
+                // If black checker exists at index > 5, cannot bear off
+                if (count < 0 && i > 5) return false;
+            }
+        }
+
+        // Also check bar (already handled by findBestMoves returning early, but good for safety)
+        if (isWhite && position.bar.white > 0) return false;
+        if (!isWhite && position.bar.black > 0) return false;
+
+        // Exact bear off?
+        const dest = isWhite ? fromIndex + die : fromIndex - die;
+
+        if (isWhite) {
+            if (dest === 24) return true; // Exact
+            if (dest > 24) {
+                // Must be no checkers on higher points (lower indices in home board for White?)
+                // White moves 0->23. Home is 18,19,20,21,22,23.
+                // If fromIndex is 20, and die is 6, dest is 26.
+                // Allowed ONLY if no checkers on 18, 19.
+                // Wait, "higher points" means points further away from exit.
+                // For White (exiting at 24), points further away are 18, 19...
+                // So if I am at 22, and roll 6. Can I bear off? Yes, if no checkers at 18,19,20,21.
+                // Actually, the rule is: you can bear off with a higher die if there are no checkers on points *further away from the end*.
+                // For White, "further away" means indices < fromIndex.
+                for (let k = 18; k < fromIndex; k++) {
+                    if (position.board[k] > 0) return false;
+                }
+                return true;
+            }
+        } else {
+            // Black moves 23->0. Home is 5,4,3,2,1,0.
+            if (dest === -1) return true; // Exact
+            if (dest < -1) {
+                // Must be no checkers on points further away (indices > fromIndex)
+                for (let k = fromIndex + 1; k <= 5; k++) {
+                    if (position.board[k] < 0) return false;
+                }
+                return true;
+            }
+        }
+        return false;
     }
 }

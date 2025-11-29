@@ -1,10 +1,13 @@
 import { Handler } from '@netlify/functions';
 import { NeuralNetworkEngine, Position } from '../../src/engine/NeuralNetworkEngine';
+import { StrategicAdvisor } from '../../src/ai/StrategicAdvisor';
 
 const engine = new NeuralNetworkEngine();
+const advisor = new StrategicAdvisor();
+
 let isInitialized = false;
 
-const initializeEngine = async () => {
+const initializeEngines = async () => {
     if (!isInitialized) {
         await engine.initialize();
         isInitialized = true;
@@ -32,21 +35,31 @@ export const handler: Handler = async (event) => {
     }
 
     try {
-        await initializeEngine();
+        await initializeEngines();
 
         const body = JSON.parse(event.body || '{}');
 
-        // Convertir le format d'entrée (boardState) vers le format interne (Position)
-        // Adapter selon ce que le frontend envoie
+        // Conversion du format d'entrée
         const position: Position = {
-            board: [], // À remplir
-            bar: { white: 0, black: 0 },
-            borneOff: { white: 0, black: 0 },
-            currentPlayer: 'white',
+            board: body.boardState?.points?.map((p: any) => p.count * (p.player === 1 ? 1 : p.player === 2 ? -1 : 0)) || [],
+            bar: { white: body.boardState?.bar?.white || 0, black: body.boardState?.bar?.black || 0 },
+            borneOff: { white: body.boardState?.off?.white || 0, black: body.boardState?.off?.black || 0 },
+            currentPlayer: body.player === 1 ? 'white' : 'black',
             dice: body.dice || []
         };
 
+        // 1. Évaluation Technique (Neural Network)
         const evaluation = await engine.evaluatePosition(position);
+
+        // 2. Analyse Stratégique (GPT-4o)
+        // On passe le contexte si disponible
+        const context = body.context || {
+            gamePhase: 'unknown',
+            matchScore: '0-0',
+            opponentTendencies: 'unknown'
+        };
+
+        const strategicAdvice = await advisor.analyzePosition(position, evaluation, context);
 
         return {
             statusCode: 200,
@@ -54,7 +67,9 @@ export const handler: Handler = async (event) => {
             body: JSON.stringify({
                 success: true,
                 evaluation,
-                bestMoves: evaluation.bestMoves
+                bestMoves: evaluation.bestMoves,
+                strategicAdvice, // Nouvelle section avec conseils GPT-4o
+                recommendations: strategicAdvice.recommendedStrategy
             })
         };
 

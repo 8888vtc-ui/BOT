@@ -4,6 +4,7 @@ import { Position, Evaluation, Move } from '../engine/NeuralNetworkEngine.js';
 
 export interface StrategicAdvice {
     analysis: string;
+    speechScript: string; // Script pour l'avatar vidéo (HeyGen)
     recommendedStrategy: 'racing' | 'blitz' | 'prime' | 'backgame' | 'holding';
     riskLevel: 'low' | 'medium' | 'high';
     keyMoves: string[];
@@ -152,10 +153,11 @@ ANALYSE PÉDAGOGIQUE DEMANDÉE:
 Agis comme un coach de classe mondiale. Ta réponse DOIT suivre strictement cette structure JSON (sans markdown \`\`\`json) :
 
 {
-  "summary": "Une phrase percutante résumant la situation (ex: 'C'est le moment d'attaquer !' ou 'Prudence, votre avance est fragile.').",
-  "strategy": "Explication claire de la stratégie globale (Course, Blitz, Prime, etc.) et POURQUOI c'est le bon choix ici.",
-  "tactics": "Détail des coups clés : pourquoi bouger ce pion précis ? Quel risque cela couvre-t-il ?",
-  "psychology": "Conseil mental (ex: 'Ne pas paniquer face au vide', 'Rester agressif').",
+  "summary": "Une phrase percutante résumant la situation.",
+  "strategy": "Explication claire de la stratégie globale.",
+  "tactics": "Détail des coups clés.",
+  "psychology": "Conseil mental.",
+  "speech_script": "Un script court (2-3 phrases max) très conversationnel que ton avatar vidéo dira à l'oral. Doit être encourageant et aller à l'essentiel. Ex: 'Ok, là c'est critique. On ne prend pas de risque, on ferme le point 5 et on attend.'",
   "key_concepts": ["Concept 1", "Concept 2"]
 }
 
@@ -207,17 +209,16 @@ Phase de jeu: ${this.determineGamePhase(position)}
         let parsedAnalysis: any = {};
 
         try {
-            // Attempt to parse JSON response
-            // Remove markdown code blocks if present
             const cleanJson = analysis.replace(/```json/g, '').replace(/```/g, '').trim();
             parsedAnalysis = JSON.parse(cleanJson);
         } catch (e) {
-            console.warn("Failed to parse AI JSON response, falling back to text parsing", e);
+            console.warn("Failed to parse AI JSON response", e);
             parsedAnalysis = {
                 summary: "Analyse de la position",
                 strategy: analysis,
                 tactics: "Voir les meilleurs coups suggérés.",
                 psychology: "Restez concentré.",
+                speech_script: "Je recommande de jouer prudemment ici.",
                 key_concepts: []
             };
         }
@@ -229,7 +230,6 @@ Phase de jeu: ${this.determineGamePhase(position)}
         else if (strategyText.includes('back') || strategyText.includes('arrière')) recommendedStrategy = 'backgame';
         else if (strategyText.includes('hold') || strategyText.includes('ancre')) recommendedStrategy = 'holding';
 
-        // Construct the formatted analysis string for the frontend
         const formattedAnalysis = `
 **${parsedAnalysis.summary}**
 
@@ -245,8 +245,9 @@ ${parsedAnalysis.psychology}
 
         return {
             analysis: formattedAnalysis,
+            speechScript: parsedAnalysis.speech_script || parsedAnalysis.summary,
             recommendedStrategy,
-            riskLevel: 'medium', // Could be inferred from text sentiment
+            riskLevel: 'medium',
             keyMoves: evaluation.bestMoves.map(m => `${m.from}→${m.to}`),
             commonMistakes: parsedAnalysis.key_concepts || [],
             positionEvaluation: {
@@ -276,6 +277,7 @@ ${parsedAnalysis.psychology}
 
         return {
             analysis: `Position évaluée à ${winPercent.toFixed(1)}% de chances de victoire. ${this.getFallbackStrategyText(strategy)}`,
+            speechScript: "Je recommande de jouer prudemment.",
             recommendedStrategy: strategy,
             riskLevel: 'medium',
             keyMoves: evaluation.bestMoves.map(m => `${m.from}-${m.to}`),

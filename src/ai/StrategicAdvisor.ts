@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { Position, Evaluation, Move } from '../engine/NeuralNetworkEngine.js';
 
 export interface StrategicAdvice {
@@ -15,15 +16,24 @@ export interface StrategicAdvice {
 }
 
 export class StrategicAdvisor {
-    private openai: OpenAI;
+    private openai: OpenAI | null = null;
+    private anthropic: Anthropic | null = null;
+    private deepseek: OpenAI | null = null;
     private cache: Map<string, StrategicAdvice>;
 
     constructor() {
-        // Fallback si la clé n'est pas présente (pour éviter crash au démarrage)
-        const apiKey = process.env.OPENAI_API_KEY || 'dummy-key';
-        this.openai = new OpenAI({
-            apiKey: apiKey,
-        });
+        if (process.env.OPENAI_API_KEY) {
+            this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        }
+        if (process.env.ANTHROPIC_API_KEY) {
+            this.anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        }
+        if (process.env.DEEPSEEK_API_KEY) {
+            this.deepseek = new OpenAI({
+                apiKey: process.env.DEEPSEEK_API_KEY,
+                baseURL: 'https://api.deepseek.com'
+            });
+        }
         this.cache = new Map();
     }
 
@@ -32,12 +42,6 @@ export class StrategicAdvisor {
         evaluation: Evaluation,
         context?: { gamePhase: string; matchScore: string; opponentTendencies: string }
     ): Promise<StrategicAdvice> {
-        // Si pas de clé API valide, retourner le fallback immédiatement
-        if (!process.env.OPENAI_API_KEY) {
-            console.warn('OPENAI_API_KEY missing, using fallback advice');
-            return this.getFallbackAdvice(evaluation);
-        }
-
         const cacheKey = this.generateCacheKey(position, context);
 
         if (this.cache.has(cacheKey)) {
@@ -52,32 +56,76 @@ export class StrategicAdvisor {
         );
 
         try {
-            const response = await this.openai.chat.completions.create({
-                model: "gpt-4o",
-                messages: [
-                    {
-                        role: "system",
-                        content: `Tu es un expert mondial du backgammon, ancien champion du monde. 
-                        Analyse les positions avec une expertise stratégique profonde.
-                        Sois concis, précis et actionable dans tes recommandations.`
-                    },
-                    {
-                        role: "user",
-                        content: analysisPrompt
-                    }
-                ],
-                temperature: 0.7,
-                max_tokens: 500
-            });
+            let analysis = '';
 
-            const analysis = response.choices[0]?.message?.content || "Analyse non disponible";
+            // 1. DeepSeek V3 (Priorité 1)
+            if (this.deepseek) {
+                console.log('Using DeepSeek V3 for analysis...');
+                const response = await this.deepseek.chat.completions.create({
+                    model: "deepseek-chat",
+                    messages: [
+                        {
+                            role: "system",
+                            content: `Tu es un expert mondial du backgammon. Analyse la position avec une profondeur stratégique exceptionnelle. Sois pédagogique.`
+                        },
+                        {
+                            role: "user",
+                            content: analysisPrompt
+                        }
+                    ],
+                    temperature: 0.6,
+                    max_tokens: 1000
+                });
+                analysis = response.choices[0]?.message?.content || "";
+            }
+            // 2. Claude 3.5 Sonnet (Priorité 2)
+            else if (this.anthropic) {
+                console.log('Using Claude 3.5 Sonnet for analysis...');
+                const message = await this.anthropic.messages.create({
+                    model: "claude-3-5-sonnet-20241022",
+                    max_tokens: 1000,
+                    temperature: 0.7,
+                    system: "Tu es un expert mondial du backgammon. Analyse les positions avec une expertise stratégique profonde.",
+                    messages: [
+                        { role: "user", content: analysisPrompt }
+                    ]
+                });
+                if (message.content[0].type === 'text') {
+                    analysis = message.content[0].text;
+                }
+            }
+            // 3. GPT-4o (Priorité 3)
+            else if (this.openai) {
+                console.log('Using GPT-4o for analysis...');
+                const response = await this.openai.chat.completions.create({
+                    model: "gpt-4o",
+                    messages: [
+                        {
+                            role: "system",
+                            content: `Tu es un expert mondial du backgammon. Analyse les positions avec une expertise stratégique profonde.`
+                        },
+                        {
+                            role: "user",
+                            content: analysisPrompt
+                        }
+                    ],
+                    temperature: 0.7,
+                    max_tokens: 500
+                });
+                analysis = response.choices[0]?.message?.content || "";
+            } else {
+                console.warn('No AI provider available, using fallback.');
+                return this.getFallbackAdvice(evaluation);
+            }
+
+            if (!analysis) throw new Error('Empty analysis received');
+
             const advice = this.parseAIResponse(analysis, evaluation);
-
             this.cache.set(cacheKey, advice);
             return advice;
 
         } catch (error) {
-            console.error('Erreur API OpenAI:', error);
+            console.error('AI API Error:', error);
             return this.getFallbackAdvice(evaluation);
         }
     }
@@ -134,8 +182,6 @@ Phase de jeu: ${this.determineGamePhase(position)}
 
     private formatBoard(board: number[]): string {
         let output = '';
-        // Simplifié pour l'exemple, à adapter selon la structure exacte de 'board'
-        // Supposons board[0-23]
         for (let i = 0; i < 24; i++) {
             const checkers = board[i] || 0;
             if (checkers !== 0) {
@@ -151,17 +197,13 @@ Phase de jeu: ${this.determineGamePhase(position)}
 
         if (whiteOff > 10 || blackOff > 10) return 'Fin de partie';
         if (whiteOff > 5 || blackOff > 5) return 'Phase de course';
-
-        // Logique simplifiée
         return 'Milieu de partie';
     }
 
     private parseAIResponse(analysis: string, evaluation: Evaluation): StrategicAdvice {
-        // Extraction des recommandations stratégiques
         const strategyMatch = analysis.match(/stratégie[^.]*(course|blitz|prime|backgame|holding)/i);
         const recommendedStrategy = (strategyMatch?.[1]?.toLowerCase() || 'racing') as StrategicAdvice['recommendedStrategy'];
 
-        // Analyse du niveau de risque
         const riskText = analysis.toLowerCase();
         let riskLevel: StrategicAdvice['riskLevel'] = 'medium';
         if (riskText.includes('risque élevé') || riskText.includes('risque fort')) riskLevel = 'high';
@@ -171,11 +213,11 @@ Phase de jeu: ${this.determineGamePhase(position)}
             analysis,
             recommendedStrategy,
             riskLevel,
-            keyMoves: [], // À extraire plus finement si besoin
+            keyMoves: [],
             commonMistakes: [],
             positionEvaluation: {
                 strength: evaluation.winProbability,
-                volatility: 0.5, // À calculer
+                volatility: 0.5,
                 complexity: 0.5
             }
         };

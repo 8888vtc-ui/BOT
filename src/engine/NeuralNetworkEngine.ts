@@ -178,55 +178,154 @@ export class NeuralNetworkEngine {
     }
 
     private findBestMoves(position: Position): Move[] {
-        // 1. Generate all legal full-turn sequences
-        // We sort dice descending to try higher moves first (optimization)
+        // 1. Generate all legal full-turn sequences (Candidate Moves)
         const sortedDice = [...position.dice].sort((a, b) => b - a);
         const sequences = this.generateTurnSequences(position, sortedDice);
 
         if (sequences.length === 0) return [];
 
-        // 2. Filter by Rule: Maximize number of moves (must use both dice if possible)
+        // 2. Filter by Rule: Maximize number of moves
         const maxMoves = Math.max(...sequences.map(s => s.moves.length));
         let candidates = sequences.filter(s => s.moves.length === maxMoves);
 
-        // 3. Filter by Rule: If not all dice used, maximize the value of the die used
-        // (If we can only play 1 move but had 2 dice of different values, must use the larger one)
+        // 3. Filter by Rule: Maximize die value if not all used
         if (maxMoves < position.dice.length && position.dice.length === 2 && position.dice[0] !== position.dice[1]) {
             const maxDieSum = Math.max(...candidates.map(s => s.dieSum));
             candidates = candidates.filter(s => s.dieSum === maxDieSum);
         }
 
-        // 4. Evaluate final states to pick the best strategy
-        let bestSequence: TurnSequence | null = null;
-        let bestEquity = -Infinity;
+        // Optimization: Prune candidates if too many (keep top 5 based on 1-ply eval)
+        // This keeps the 2-ply search fast enough for real-time play.
+        if (candidates.length > 5) {
+            candidates.sort((a, b) => {
+                const eqA = this.heuristicEvaluation(a.finalPosition);
+                const eqB = this.heuristicEvaluation(b.finalPosition);
+                // If current player is White, higher is better.
+                return position.currentPlayer === 'white' ? eqB - eqA : eqA - eqB;
+            });
+            candidates = candidates.slice(0, 5);
+        }
 
-        // Determine who is playing to maximize their equity
-        // heuristicEvaluation returns + for White advantage, - for Black advantage.
-        // If current player is White, we want Max Equity.
-        // If current player is Black, we want Min Equity.
+        // 4. 2-Ply Expectiminimax Search
+        // For each candidate, we calculate the "Equity" by averaging the opponent's best replies.
+
+        let bestSequence: TurnSequence | null = null;
+        let bestEquity = -Infinity; // Always maximizing "My Equity"
+
         const isWhite = position.currentPlayer === 'white';
 
         for (const seq of candidates) {
-            const equity = this.heuristicEvaluation(seq.finalPosition);
+            // Calculate Expectiminimax Equity
+            // We want to know: How bad will the opponent hurt me after this move?
+            const deepEquity = this.calculateDeepEquity(seq.finalPosition);
 
-            if (isWhite) {
-                if (equity > bestEquity) {
-                    bestEquity = equity;
-                    bestSequence = seq;
-                }
-            } else {
-                // For Black, we want the lowest equity (most negative)
-                // So we invert the comparison or use a separate variable.
-                // Let's use a unified "Score" where higher is better for the current player.
-                const score = isWhite ? equity : -equity;
-                if (score > bestEquity) { // Re-using bestEquity variable name for "Best Score"
-                    bestEquity = score;
-                    bestSequence = seq;
-                }
+            // Convert to "My Perspective"
+            // calculateDeepEquity returns the equity of the resulting position.
+            // If I am White, the resulting position has Black to play.
+            // The heuristic returns + for White adv.
+            // So if I am White, I want the result to be Max Positive.
+
+            // However, calculateDeepEquity simulates Black's turn.
+            // Black will try to minimize the score (make it negative).
+            // So deepEquity will be the "Best possible score Black can achieve".
+            // As White, I want to choose the move where "Black's best score" is as high (positive) as possible (i.e., least bad for me).
+
+            const score = isWhite ? deepEquity : -deepEquity;
+
+            if (score > bestEquity) {
+                bestEquity = score;
+                bestSequence = seq;
             }
         }
 
         return bestSequence ? bestSequence.moves : [];
+    }
+
+    // Simulates the opponent's turn (Chance Node -> Min/Max Node)
+    private calculateDeepEquity(position: Position): number {
+        // 1. Get all 21 dice rolls
+        const rolls = this.getAllDiceRolls();
+        let totalEquity = 0;
+        let totalProbability = 0;
+
+        // The position passed here has the *previous* player as current.
+        // We need to switch perspective for the simulation.
+        const nextPlayer = position.currentPlayer === 'white' ? 'black' : 'white';
+        const isNextWhite = nextPlayer === 'white';
+
+        for (const roll of rolls) {
+            // Setup hypothetical position for opponent
+            const simPosition: Position = {
+                ...position,
+                currentPlayer: nextPlayer,
+                dice: roll.dice
+            };
+
+            // 2. Find Opponent's Best Move (1-ply) for this roll
+            // We use the same generation logic but just pick the best heuristic static score.
+            const moves = this.findBestMoves1Ply(simPosition);
+
+            // Apply the move to get the leaf node
+            let leafPos = this.clonePosition(simPosition);
+            for (const m of moves) {
+                leafPos = this.applyMove(leafPos, m);
+            }
+
+            // 3. Evaluate Leaf Node
+            const equity = this.heuristicEvaluation(leafPos);
+
+            // Add to weighted average
+            totalEquity += equity * roll.probability;
+            totalProbability += roll.probability;
+        }
+
+        return totalEquity / totalProbability;
+    }
+
+    // Helper for the inner loop (fast 1-ply search)
+    private findBestMoves1Ply(position: Position): Move[] {
+        const sortedDice = [...position.dice].sort((a, b) => b - a);
+        const sequences = this.generateTurnSequences(position, sortedDice);
+        if (sequences.length === 0) return [];
+
+        const maxMoves = Math.max(...sequences.map(s => s.moves.length));
+        let candidates = sequences.filter(s => s.moves.length === maxMoves);
+
+        if (maxMoves < position.dice.length && position.dice.length === 2 && position.dice[0] !== position.dice[1]) {
+            const maxDieSum = Math.max(...candidates.map(s => s.dieSum));
+            candidates = candidates.filter(s => s.dieSum === maxDieSum);
+        }
+
+        // Pick best static evaluation
+        let bestSeq = candidates[0];
+        let bestEq = -Infinity;
+        const isWhite = position.currentPlayer === 'white';
+
+        for (const seq of candidates) {
+            const eq = this.heuristicEvaluation(seq.finalPosition);
+            const score = isWhite ? eq : -eq;
+            if (score > bestEq) {
+                bestEq = score;
+                bestSeq = seq;
+            }
+        }
+        return bestSeq.moves;
+    }
+
+    private getAllDiceRolls(): { dice: number[], probability: number }[] {
+        const rolls: { dice: number[], probability: number }[] = [];
+        for (let i = 1; i <= 6; i++) {
+            for (let j = i; j <= 6; j++) {
+                if (i === j) {
+                    // Double: 1/36 probability, 4 dice
+                    rolls.push({ dice: [i, i, i, i], probability: 1 });
+                } else {
+                    // Non-double: 2/36 probability (i,j and j,i), 2 dice
+                    rolls.push({ dice: [i, j], probability: 2 });
+                }
+            }
+        }
+        return rolls;
     }
 
     // Recursive function to find all valid sequences of moves

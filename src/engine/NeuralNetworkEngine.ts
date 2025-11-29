@@ -1,4 +1,4 @@
-import * as tf from '@tensorflow/tfjs-node';
+import * as tf from '@tensorflow/tfjs';
 
 export interface Position {
     board: number[]; // 28 points (0-23 board, 24 bar white, 25 bar black, 26 off white, 27 off black)

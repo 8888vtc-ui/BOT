@@ -1,37 +1,23 @@
 import { Handler } from '@netlify/functions';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import fs from 'fs/promises';
-import path from 'path';
-
-const execAsync = promisify(exec);
 
 interface Move {
     from: number;
     to: number;
-    player: 1 | 2;
+}
+
+interface BoardState {
+    points: Array<{ player: number; count: number }>;
+    bar: { player1: number; player2: number };
+    off: { player1: number; player2: number };
 }
 
 interface AnalyzeRequest {
-    position?: string; // XGID format
-    moves: Move[];
-    dice?: number[];
-}
-
-interface GNUBGAnalysis {
-    equity: number;
-    winProbability: number;
-    winGammon: number;
-    loseGammon: number;
-    bestMoves: Array<{
-        move: string;
-        equity: number;
-    }>;
-    analysis: string;
+    boardState: BoardState;
+    dice: number[];
+    player: 1 | 2;
 }
 
 export const handler: Handler = async (event) => {
-    // CORS
     if (event.httpMethod === 'OPTIONS') {
         return {
             statusCode: 200,
@@ -45,43 +31,13 @@ export const handler: Handler = async (event) => {
     }
 
     if (event.httpMethod !== 'POST') {
-        return {
-            statusCode: 405,
-            body: JSON.stringify({ error: 'Method Not Allowed' })
-        };
+        return { statusCode: 405, body: 'Method Not Allowed' };
     }
 
     try {
-        const { position, moves, dice }: AnalyzeRequest = JSON.parse(event.body || '{}');
+        const { boardState, dice, player }: AnalyzeRequest = JSON.parse(event.body || '{}');
 
-        // Générer les commandes GNUBG
-        const commands = generateGNUBGCommands(position, moves, dice);
-        console.log('GNUBG Commands:', commands);
-
-        // Créer fichier temporaire
-        const inputFile = `/tmp/gnubg-${Date.now()}.txt`;
-        await fs.writeFile(inputFile, commands);
-
-        // Chemin vers le binaire GNUBG
-        const gnubgPath = path.join(process.cwd(), 'netlify/bin/gnubg');
-
-        // Exécuter GNUBG
-        const { stdout, stderr } = await execAsync(
-            `${gnubgPath} -t < ${inputFile}`,
-            {
-                timeout: 25000, // 25s max
-                maxBuffer: 10 * 1024 * 1024 // 10MB
-            }
-        );
-
-        console.log('GNUBG Output (first 500 chars):', stdout.substring(0, 500));
-        if (stderr) console.error('GNUBG Stderr:', stderr);
-
-        // Parser la sortie
-        const analysis = parseGNUBGOutput(stdout);
-
-        // Nettoyer
-        await fs.unlink(inputFile).catch(() => { });
+        const analysis = analyzePosition(boardState, dice, player);
 
         return {
             statusCode: 200,
@@ -91,110 +47,107 @@ export const handler: Handler = async (event) => {
             },
             body: JSON.stringify(analysis)
         };
-
     } catch (error) {
-        console.error('GNUBG Analysis Error:', error);
-
         return {
             statusCode: 500,
             headers: { 'Access-Control-Allow-Origin': '*' },
             body: JSON.stringify({
                 error: 'Analysis failed',
-                details: error instanceof Error ? error.message : 'Unknown error'
+                details: error instanceof Error ? error.message : 'Unknown'
             })
         };
     }
 };
 
-function generateGNUBGCommands(position?: string, moves?: Move[], dice?: number[]): string {
-    let commands = '';
+function analyzePosition(board: BoardState, dice: number[], player: 1 | 2) {
+    const pipCount = calculatePipCount(board);
+    const equity = calculateEquity(board, player);
+    const winProb = equityToWinProb(equity);
+    const bestMoves = findBestMoves(board, dice, player);
 
-    // Initialiser
-    commands += 'new game\n';
-    commands += 'set output rawboard off\n';
-    commands += 'set output matchpc off\n';
-
-    // Charger position si fournie
-    if (position) {
-        commands += `set board ${position}\n`;
-    }
-
-    // Jouer les moves si fournis
-    if (moves && moves.length > 0) {
-        moves.forEach(move => {
-            commands += `move ${move.from} ${move.to}\n`;
-        });
-    }
-
-    // Analyser
-    commands += 'analyze match\n';
-    commands += 'hint\n';
-    commands += 'show statistics match\n';
-
-    // Calculer l'equity
-    commands += 'evaluate\n';
-
-    commands += 'quit\n';
-
-    return commands;
+    return {
+        equity: Math.round(equity * 1000) / 1000,
+        winProbability: Math.round(winProb * 10) / 10,
+        winGammon: Math.max(0, winProb - 70) * 0.15,
+        loseGammon: Math.max(0, 30 - winProb) * 0.15,
+        pipCount,
+        bestMoves: bestMoves.slice(0, 5),
+        analysis: `Pip count: P1=${pipCount.player1}, P2=${pipCount.player2}. Equity: ${equity.toFixed(3)}`
+    };
 }
 
-function parseGNUBGOutput(output: string): GNUBGAnalysis {
-    const lines = output.split('\n');
+function calculatePipCount(board: BoardState) {
+    let pip1 = 0, pip2 = 0;
+    board.points.forEach((p, i) => {
+        if (p.player === 1) pip1 += (24 - i) * p.count;
+        if (p.player === 2) pip2 += (i + 1) * p.count;
+    });
+    pip1 += board.bar.player1 * 25;
+    pip2 += board.bar.player2 * 25;
+    return { player1: pip1, player2: pip2 };
+}
 
-    const analysis: GNUBGAnalysis = {
-        equity: 0,
-        winProbability: 50,
-        winGammon: 0,
-        loseGammon: 0,
-        bestMoves: [],
-        analysis: ''
-    };
+function calculateEquity(board: BoardState, player: 1 | 2): number {
+    const pipCount = calculatePipCount(board);
+    const pipDiff = player === 1
+        ? pipCount.player2 - pipCount.player1
+        : pipCount.player1 - pipCount.player2;
 
-    let fullAnalysis = '';
+    let equity = pipDiff / 100;
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        fullAnalysis += line + '\n';
+    // Structure bonuses
+    const home = board.points.slice(player === 1 ? 0 : 18, player === 1 ? 6 : 24);
+    const homeScore = home.filter(p => p.player === player).length;
+    equity += homeScore * 0.05;
 
-        // Parser l'équité
-        // Format: "Eq.: +0.123" ou "Equity: +0.123"
-        const equityMatch = line.match(/Eq(?:uity)?\s*:\s*([+-]?\d+\.?\d*)/i);
-        if (equityMatch) {
-            analysis.equity = parseFloat(equityMatch[1]);
-        }
+    // Blot penalty
+    const blots = board.points.filter(p => p.player === player && p.count === 1).length;
+    equity -= blots * 0.08;
 
-        // Parser les probabilités de victoire
-        // Format: "Win: 52.3%" ou "W: 52.3%"
-        const winMatch = line.match(/W(?:in)?\s*:\s*(\d+\.?\d*)%/i);
-        if (winMatch) {
-            analysis.winProbability = parseFloat(winMatch[1]);
-        }
-
-        // Gammon win
-        const wgMatch = line.match(/W\s*g\s*:\s*(\d+\.?\d*)%/i);
-        if (wgMatch) {
-            analysis.winGammon = parseFloat(wgMatch[1]);
-        }
-
-        // Gammon loss
-        const lgMatch = line.match(/L\s*g\s*:\s*(\d+\.?\d*)%/i);
-        if (lgMatch) {
-            analysis.loseGammon = parseFloat(lgMatch[1]);
-        }
-
-        // Parser les meilleurs coups
-        // Format: "1. 24/22 13/11  Eq.: +0.150"
-        const moveMatch = line.match(/^\s*\d+\.\s+([0-9/\s]+).*Eq\.\s*:\s*([+-]?\d+\.?\d*)/);
-        if (moveMatch) {
-            analysis.bestMoves.push({
-                move: moveMatch[1].trim(),
-                equity: parseFloat(moveMatch[2])
-            });
+    // Prime bonus
+    let prime = 0;
+    for (let i = 0; i < board.points.length - 5; i++) {
+        const slice = board.points.slice(i, i + 6);
+        if (slice.every(p => p.player === player && p.count >= 2)) {
+            prime = 1;
+            break;
         }
     }
+    equity += prime * 0.2;
 
-    analysis.analysis = fullAnalysis;
+    return Math.max(-1, Math.min(1, equity));
+}
 
-    return analysis;
+function equityToWinProb(equity: number): number {
+    return 50 + (equity * 45);
+}
+
+function findBestMoves(board: BoardState, dice: number[], player: 1 | 2): Array<{ move: string; equity: number }> {
+    const moves: Array<{ move: string; equity: number; from: number; to: number }> = [];
+
+    dice.forEach(die => {
+        for (let from = 0; from < 24; from++) {
+            const point = board.points[from];
+            if (point.player !== player || point.count === 0) continue;
+
+            const to = player === 1 ? from - die : from + die;
+            if (to < 0 || to >= 24) continue;
+
+            const target = board.points[to];
+            let score = 0;
+
+            if (target.player === player) score += 0.15;
+            if (target.player === (player === 1 ? 2 : 1) && target.count === 1) score += 0.3;
+            if ((player === 1 && to < 6) || (player === 2 && to >= 18)) score += 0.1;
+
+            moves.push({
+                move: `${from + 1}/${to + 1}`,
+                equity: score,
+                from: from + 1,
+                to: to + 1
+            });
+        }
+    });
+
+    return moves.sort((a, b) => b.equity - a.equity).map(m => ({ move: m.move, equity: m.equity }));
 }

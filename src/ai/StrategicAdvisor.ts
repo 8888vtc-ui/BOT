@@ -145,18 +145,21 @@ ${positionDesc}
 ÉVALUATION DU MOTEUR:
 - Probabilité de victoire: ${(evaluation.winProbability * 100).toFixed(1)}%
 - Probabilité gammon: ${(evaluation.gammonProbability * 100).toFixed(1)}%
-- Probabilité backgammon: ${(evaluation.backgammonProbability * 100).toFixed(1)}%
 - Équité: ${evaluation.equity.toFixed(2)}
 - Meilleurs coups: ${evaluation.bestMoves.map(m => `${m.from}→${m.to}`).join(', ')}
 
-ANALYSE DEMANDÉE:
-1. Évaluation stratégique globale
-2. Plan recommandé pour les 3-4 prochains coups
-3. Pièges à éviter
-4. Adaptation à la position
-5. Conseils psychologiques si pertinent
+ANALYSE PÉDAGOGIQUE DEMANDÉE:
+Agis comme un coach de classe mondiale. Ta réponse DOIT suivre strictement cette structure JSON (sans markdown \`\`\`json) :
 
-Format de réponse structurée:
+{
+  "summary": "Une phrase percutante résumant la situation (ex: 'C'est le moment d'attaquer !' ou 'Prudence, votre avance est fragile.').",
+  "strategy": "Explication claire de la stratégie globale (Course, Blitz, Prime, etc.) et POURQUOI c'est le bon choix ici.",
+  "tactics": "Détail des coups clés : pourquoi bouger ce pion précis ? Quel risque cela couvre-t-il ?",
+  "psychology": "Conseil mental (ex: 'Ne pas paniquer face au vide', 'Rester agressif').",
+  "key_concepts": ["Concept 1", "Concept 2"]
+}
+
+Sois concis, direct et encourageant.
 `;
     }
 
@@ -201,20 +204,51 @@ Phase de jeu: ${this.determineGamePhase(position)}
     }
 
     private parseAIResponse(analysis: string, evaluation: Evaluation): StrategicAdvice {
-        const strategyMatch = analysis.match(/stratégie[^.]*(course|blitz|prime|backgame|holding)/i);
-        const recommendedStrategy = (strategyMatch?.[1]?.toLowerCase() || 'racing') as StrategicAdvice['recommendedStrategy'];
+        let parsedAnalysis: any = {};
 
-        const riskText = analysis.toLowerCase();
-        let riskLevel: StrategicAdvice['riskLevel'] = 'medium';
-        if (riskText.includes('risque élevé') || riskText.includes('risque fort')) riskLevel = 'high';
-        if (riskText.includes('risque faible') || riskText.includes('prudent')) riskLevel = 'low';
+        try {
+            // Attempt to parse JSON response
+            // Remove markdown code blocks if present
+            const cleanJson = analysis.replace(/```json/g, '').replace(/```/g, '').trim();
+            parsedAnalysis = JSON.parse(cleanJson);
+        } catch (e) {
+            console.warn("Failed to parse AI JSON response, falling back to text parsing", e);
+            parsedAnalysis = {
+                summary: "Analyse de la position",
+                strategy: analysis,
+                tactics: "Voir les meilleurs coups suggérés.",
+                psychology: "Restez concentré.",
+                key_concepts: []
+            };
+        }
+
+        const strategyText = (parsedAnalysis.strategy || "").toLowerCase();
+        let recommendedStrategy: StrategicAdvice['recommendedStrategy'] = 'racing';
+        if (strategyText.includes('blitz')) recommendedStrategy = 'blitz';
+        else if (strategyText.includes('prime') || strategyText.includes('mur')) recommendedStrategy = 'prime';
+        else if (strategyText.includes('back') || strategyText.includes('arrière')) recommendedStrategy = 'backgame';
+        else if (strategyText.includes('hold') || strategyText.includes('ancre')) recommendedStrategy = 'holding';
+
+        // Construct the formatted analysis string for the frontend
+        const formattedAnalysis = `
+**${parsedAnalysis.summary}**
+
+🎯 **Stratégie :**
+${parsedAnalysis.strategy}
+
+♟️ **Tactique :**
+${parsedAnalysis.tactics}
+
+🧠 **Mental :**
+${parsedAnalysis.psychology}
+        `.trim();
 
         return {
-            analysis,
+            analysis: formattedAnalysis,
             recommendedStrategy,
-            riskLevel,
-            keyMoves: [],
-            commonMistakes: [],
+            riskLevel: 'medium', // Could be inferred from text sentiment
+            keyMoves: evaluation.bestMoves.map(m => `${m.from}→${m.to}`),
+            commonMistakes: parsedAnalysis.key_concepts || [],
             positionEvaluation: {
                 strength: evaluation.winProbability,
                 volatility: 0.5,

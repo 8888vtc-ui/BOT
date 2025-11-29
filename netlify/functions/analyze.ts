@@ -13,30 +13,25 @@ interface Move {
 }
 
 interface AnalyzeRequest {
+    position?: string; // XGID format
     moves: Move[];
-    initialPosition?: string;
+    dice?: number[];
 }
 
 interface GNUBGAnalysis {
     equity: number;
     winProbability: number;
-    loseGammon: number;
     winGammon: number;
-    errors: Array<{
-        moveNumber: number;
-        type: 'blunder' | 'error' | 'doubtful';
-        equityLoss: number;
-        correctMove: string;
-    }>;
+    loseGammon: number;
     bestMoves: Array<{
-        from: number;
-        to: number;
+        move: string;
         equity: number;
     }>;
+    analysis: string;
 }
 
 export const handler: Handler = async (event) => {
-    // CORS Preflight
+    // CORS
     if (event.httpMethod === 'OPTIONS') {
         return {
             statusCode: 200,
@@ -57,42 +52,36 @@ export const handler: Handler = async (event) => {
     }
 
     try {
-        const { moves, initialPosition }: AnalyzeRequest = JSON.parse(event.body || '{}');
+        const { position, moves, dice }: AnalyzeRequest = JSON.parse(event.body || '{}');
 
-        if (!moves || moves.length === 0) {
-            return {
-                statusCode: 400,
-                headers: { 'Access-Control-Allow-Origin': '*' },
-                body: JSON.stringify({ error: 'No moves provided' })
-            };
-        }
+        // Générer les commandes GNUBG
+        const commands = generateGNUBGCommands(position, moves, dice);
+        console.log('GNUBG Commands:', commands);
 
-        // Générer le fichier de commandes GNUBG
-        const gnubgCommands = generateGNUBGCommands(moves, initialPosition);
-
-        const inputFile = `/tmp/game-${Date.now()}.txt`;
-        const outputFile = `/tmp/analysis-${Date.now()}.sgf`;
-
-        await fs.writeFile(inputFile, gnubgCommands);
+        // Créer fichier temporaire
+        const inputFile = `/tmp/gnubg-${Date.now()}.txt`;
+        await fs.writeFile(inputFile, commands);
 
         // Chemin vers le binaire GNUBG
         const gnubgPath = path.join(process.cwd(), 'netlify/bin/gnubg');
 
-        console.log('Executing GNUBG analysis...');
-
+        // Exécuter GNUBG
         const { stdout, stderr } = await execAsync(
             `${gnubgPath} -t < ${inputFile}`,
-            { timeout: 25000 } // 25s max
+            {
+                timeout: 25000, // 25s max
+                maxBuffer: 10 * 1024 * 1024 // 10MB
+            }
         );
 
-        console.log('GNUBG output:', stdout.substring(0, 500));
+        console.log('GNUBG Output (first 500 chars):', stdout.substring(0, 500));
+        if (stderr) console.error('GNUBG Stderr:', stderr);
 
         // Parser la sortie
         const analysis = parseGNUBGOutput(stdout);
 
-        // Nettoyer les fichiers temporaires
+        // Nettoyer
         await fs.unlink(inputFile).catch(() => { });
-        await fs.unlink(outputFile).catch(() => { });
 
         return {
             statusCode: 200,
@@ -117,32 +106,33 @@ export const handler: Handler = async (event) => {
     }
 };
 
-function generateGNUBGCommands(moves: Move[], initialPosition?: string): string {
+function generateGNUBGCommands(position?: string, moves?: Move[], dice?: number[]): string {
     let commands = '';
 
-    // Initialiser une nouvelle partie
+    // Initialiser
     commands += 'new game\n';
-    commands += 'set automatic off\n';
-    commands += 'set display off\n';
+    commands += 'set output rawboard off\n';
+    commands += 'set output matchpc off\n';
 
-    // Si position initiale fournie (format XGID)
-    if (initialPosition) {
-        commands += `set board ${initialPosition}\n`;
+    // Charger position si fournie
+    if (position) {
+        commands += `set board ${position}\n`;
     }
 
-    // Jouer tous les moves
-    moves.forEach(move => {
-        commands += `move ${move.from} ${move.to}\n`;
-    });
+    // Jouer les moves si fournis
+    if (moves && moves.length > 0) {
+        moves.forEach(move => {
+            commands += `move ${move.from} ${move.to}\n`;
+        });
+    }
 
-    // Analyser le match
+    // Analyser
     commands += 'analyze match\n';
-
-    // Obtenir les suggestions
     commands += 'hint\n';
-
-    // Afficher les statistiques
     commands += 'show statistics match\n';
+
+    // Calculer l'equity
+    commands += 'evaluate\n';
 
     commands += 'quit\n';
 
@@ -155,53 +145,56 @@ function parseGNUBGOutput(output: string): GNUBGAnalysis {
     const analysis: GNUBGAnalysis = {
         equity: 0,
         winProbability: 50,
-        loseGammon: 0,
         winGammon: 0,
-        errors: [],
-        bestMoves: []
+        loseGammon: 0,
+        bestMoves: [],
+        analysis: ''
     };
 
-    // Parser l'équité et les probabilités
-    for (const line of lines) {
-        // Exemple de ligne GNUBG :
-        // "Eq.: +0.123  Win: 52.3%  W g: 12.1%  W bg: 0.5%"
+    let fullAnalysis = '';
 
-        if (line.includes('Eq.:')) {
-            const equityMatch = line.match(/Eq\.: ([+-]?\d+\.\d+)/);
-            if (equityMatch) {
-                analysis.equity = parseFloat(equityMatch[1]);
-            }
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        fullAnalysis += line + '\n';
+
+        // Parser l'équité
+        // Format: "Eq.: +0.123" ou "Equity: +0.123"
+        const equityMatch = line.match(/Eq(?:uity)?\s*:\s*([+-]?\d+\.?\d*)/i);
+        if (equityMatch) {
+            analysis.equity = parseFloat(equityMatch[1]);
         }
 
-        if (line.includes('Win:')) {
-            const winMatch = line.match(/Win: (\d+\.\d+)%/);
-            if (winMatch) {
-                analysis.winProbability = parseFloat(winMatch[1]);
-            }
+        // Parser les probabilités de victoire
+        // Format: "Win: 52.3%" ou "W: 52.3%"
+        const winMatch = line.match(/W(?:in)?\s*:\s*(\d+\.?\d*)%/i);
+        if (winMatch) {
+            analysis.winProbability = parseFloat(winMatch[1]);
         }
 
-        if (line.includes('W g:')) {
-            const wgMatch = line.match(/W g: (\d+\.\d+)%/);
-            if (wgMatch) {
-                analysis.winGammon = parseFloat(wgMatch[1]);
-            }
+        // Gammon win
+        const wgMatch = line.match(/W\s*g\s*:\s*(\d+\.?\d*)%/i);
+        if (wgMatch) {
+            analysis.winGammon = parseFloat(wgMatch[1]);
         }
 
-        // Détecter les erreurs
-        if (line.includes('blunder') || line.includes('error') || line.includes('doubtful')) {
-            const errorType = line.includes('blunder') ? 'blunder' :
-                line.includes('error') ? 'error' : 'doubtful';
+        // Gammon loss
+        const lgMatch = line.match(/L\s*g\s*:\s*(\d+\.?\d*)%/i);
+        if (lgMatch) {
+            analysis.loseGammon = parseFloat(lgMatch[1]);
+        }
 
-            const equityLossMatch = line.match(/\[([+-]?\d+\.\d+)\]/);
-
-            analysis.errors.push({
-                moveNumber: analysis.errors.length + 1,
-                type: errorType,
-                equityLoss: equityLossMatch ? Math.abs(parseFloat(equityLossMatch[1])) : 0,
-                correctMove: 'TBD' // À extraire de la sortie GNUBG
+        // Parser les meilleurs coups
+        // Format: "1. 24/22 13/11  Eq.: +0.150"
+        const moveMatch = line.match(/^\s*\d+\.\s+([0-9/\s]+).*Eq\.\s*:\s*([+-]?\d+\.?\d*)/);
+        if (moveMatch) {
+            analysis.bestMoves.push({
+                move: moveMatch[1].trim(),
+                equity: parseFloat(moveMatch[2])
             });
         }
     }
+
+    analysis.analysis = fullAnalysis;
 
     return analysis;
 }

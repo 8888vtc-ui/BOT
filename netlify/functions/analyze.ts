@@ -1,11 +1,13 @@
 import { Handler } from '@netlify/functions';
 import { NeuralNetworkEngine, Position } from '../../src/engine/NeuralNetworkEngine';
 import { WorldClassEngine } from '../../src/engine/WorldClassEngine';
+import { SuperiorEngine } from '../../src/engine/SuperiorEngine';
 import { StrategicAdvisor } from '../../src/ai/StrategicAdvisor';
 
-// Utiliser le moteur de niveau mondial par défaut
-const engine = new WorldClassEngine();
-const fallbackEngine = new NeuralNetworkEngine(); // Fallback si problème
+// Utiliser le moteur SUPÉRIEUR (dépasse Snowie) par défaut
+const engine = new SuperiorEngine();
+const fallbackEngine = new WorldClassEngine(); // Fallback niveau mondial
+const legacyEngine = new NeuralNetworkEngine(); // Fallback legacy
 const advisor = new StrategicAdvisor();
 
 let isInitialized = false;
@@ -51,15 +53,20 @@ export const handler: Handler = async (event) => {
             dice: body.dice || []
         };
 
-        // 1. Évaluation Technique (World-Class Engine avec DeepSeek)
-        // Utiliser DeepSeek pour positions critiques (équité proche de 0)
+        // 1. Évaluation Technique (Superior Engine - Dépasse Snowie)
+        // DeepSeek systématique pour toutes positions (pas seulement critiques)
         const useDeepSeek = body.useDeepSeek !== false; // Activé par défaut
         let evaluation;
         try {
             evaluation = await engine.evaluatePosition(position, useDeepSeek);
         } catch (error) {
-            console.warn('WorldClassEngine error, using fallback:', error);
-            evaluation = await fallbackEngine.evaluatePosition(position);
+            console.warn('SuperiorEngine error, using WorldClass fallback:', error);
+            try {
+                evaluation = await fallbackEngine.evaluatePosition(position, useDeepSeek);
+            } catch (error2) {
+                console.warn('WorldClassEngine error, using legacy fallback:', error2);
+                evaluation = await legacyEngine.evaluatePosition(position);
+            }
         }
 
         // 2. Analyse Stratégique (GPT-4o)

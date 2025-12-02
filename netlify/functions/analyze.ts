@@ -1,8 +1,11 @@
 import { Handler } from '@netlify/functions';
 import { NeuralNetworkEngine, Position } from '../../src/engine/NeuralNetworkEngine';
+import { WorldClassEngine } from '../../src/engine/WorldClassEngine';
 import { StrategicAdvisor } from '../../src/ai/StrategicAdvisor';
 
-const engine = new NeuralNetworkEngine();
+// Utiliser le moteur de niveau mondial par défaut
+const engine = new WorldClassEngine();
+const fallbackEngine = new NeuralNetworkEngine(); // Fallback si problème
 const advisor = new StrategicAdvisor();
 
 let isInitialized = false;
@@ -48,8 +51,16 @@ export const handler: Handler = async (event) => {
             dice: body.dice || []
         };
 
-        // 1. Évaluation Technique (Neural Network)
-        const evaluation = await engine.evaluatePosition(position);
+        // 1. Évaluation Technique (World-Class Engine avec DeepSeek)
+        // Utiliser DeepSeek pour positions critiques (équité proche de 0)
+        const useDeepSeek = body.useDeepSeek !== false; // Activé par défaut
+        let evaluation;
+        try {
+            evaluation = await engine.evaluatePosition(position, useDeepSeek);
+        } catch (error) {
+            console.warn('WorldClassEngine error, using fallback:', error);
+            evaluation = await fallbackEngine.evaluatePosition(position);
+        }
 
         // 2. Analyse Stratégique (GPT-4o)
         // On passe le contexte si disponible

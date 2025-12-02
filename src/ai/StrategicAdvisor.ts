@@ -59,23 +59,23 @@ export class StrategicAdvisor {
         try {
             let analysis = '';
 
-            // 1. DeepSeek V3 (Priorité 1)
+            // 1. DeepSeek V3 (Priorité 1) - Modèle optimisé pour backgammon
             if (this.deepseek) {
-                console.log('Using DeepSeek V3 for analysis...');
+                console.log('Using DeepSeek V3 for world-class analysis...');
                 const response = await this.deepseek.chat.completions.create({
                     model: "deepseek-chat",
                     messages: [
                         {
                             role: "system",
-                            content: `Tu es un expert mondial du backgammon. Analyse la position avec une profondeur stratégique exceptionnelle. Sois pédagogique.`
+                            content: `Tu es un expert mondial du backgammon de niveau professionnel (ELO 2500+). Tu analyses les positions avec une précision exceptionnelle et une compréhension profonde de la stratégie, des tactiques et de la théorie du backgammon. Tu connais toutes les ouvertures standards, les techniques de milieu de partie, les finitions optimales et la stratégie du cube. Sois précis, pédagogique et donne des conseils de niveau mondial.`
                         },
                         {
                             role: "user",
                             content: analysisPrompt
                         }
                     ],
-                    temperature: 0.6,
-                    max_tokens: 1000
+                    temperature: 0.4, // Plus déterministe pour meilleure précision
+                    max_tokens: 1500 // Plus de tokens pour analyse approfondie
                 });
                 analysis = response.choices[0]?.message?.content || "";
             }

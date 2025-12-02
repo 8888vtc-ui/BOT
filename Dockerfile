@@ -1,10 +1,18 @@
 FROM ollama/ollama:latest
 
-# Télécharger DeepSeek au démarrage
-RUN ollama pull deepseek-coder
-
 # Exposer le port Ollama
 EXPOSE 11434
 
-# Démarrer Ollama
-CMD ["ollama", "serve"]
+# Créer un script de démarrage qui démarre Ollama puis télécharge le modèle
+RUN echo '#!/bin/sh\n\
+# Démarrer Ollama en arrière-plan\n\
+ollama serve &\n\
+# Attendre que Ollama soit prêt\n\
+sleep 10\n\
+# Télécharger DeepSeek\n\
+ollama pull deepseek-coder\n\
+# Garder Ollama en cours d'\''exécution\n\
+wait' > /start.sh && chmod +x /start.sh
+
+# Utiliser le script de démarrage
+CMD ["/start.sh"]

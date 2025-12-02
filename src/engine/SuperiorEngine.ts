@@ -14,6 +14,7 @@
 import * as tf from '@tensorflow/tfjs';
 import { Position, Move, Evaluation } from './NeuralNetworkEngine';
 import OpenAI from 'openai';
+import { OllamaService } from '../services/OllamaService';
 
 interface TurnSequence {
     moves: Move[];
@@ -25,6 +26,7 @@ export class SuperiorEngine {
     private model: tf.LayersModel | null = null;
     private isInitialized = false;
     private deepseek: OpenAI | null = null;
+    private ollama: OllamaService | null = null;
     private transpositionTable: Map<string, Evaluation> = new Map();
     private openingBook: Map<string, Move[]> = new Map();
     private bearOffTables: Map<string, number> = new Map();
@@ -32,11 +34,21 @@ export class SuperiorEngine {
     private endgameDatabases: Map<string, Evaluation> = new Map();
 
     constructor() {
-        if (process.env.DEEPSEEK_API_KEY) {
+        // Priorité 1 : Ollama (gratuit) si disponible
+        if (process.env.OLLAMA_URL) {
+            this.ollama = new OllamaService(
+                process.env.OLLAMA_URL,
+                process.env.OLLAMA_MODEL || 'deepseek-coder'
+            );
+            console.log('Using Ollama (FREE) for DeepSeek local');
+        }
+        // Fallback : DeepSeek API (payant) si Ollama non disponible
+        else if (process.env.DEEPSEEK_API_KEY) {
             this.deepseek = new OpenAI({
                 apiKey: process.env.DEEPSEEK_API_KEY,
                 baseURL: 'https://api.deepseek.com'
             });
+            console.log('Using DeepSeek API (paid)');
         }
         this.initializeOpeningBook();
         this.initializeBearOffTables();
@@ -91,19 +103,47 @@ export class SuperiorEngine {
         const equity = this.superiorHeuristicEvaluation(currentPos);
         const winProb = 0.5 + (equity / 2);
 
-        // DeepSeek systématique pour toutes positions (pas seulement critiques)
+        // DeepSeek systématique pour toutes positions (Ollama gratuit ou API payante)
         let evaluation: Evaluation;
-        if (useDeepSeek && this.deepseek) {
-            const deepSeekEval = await this.deepSeekEvaluationSuperior(position, bestMoves, equity);
-            if (deepSeekEval) {
-                evaluation = {
-                    winProbability: deepSeekEval.winProbability,
-                    gammonProbability: deepSeekEval.gammonProbability,
-                    backgammonProbability: deepSeekEval.backgammonProbability,
-                    bestMoves: deepSeekEval.bestMoves || bestMoves,
-                    equity: deepSeekEval.equity || equity
-                };
+        if (useDeepSeek) {
+            // Priorité 1 : Ollama (gratuit)
+            if (this.ollama) {
+                const ollamaEval = await this.ollama.evaluatePosition(position, bestMoves, equity);
+                if (ollamaEval) {
+                    evaluation = ollamaEval;
+                } else {
+                    // Fallback vers heuristique si Ollama échoue
+                    evaluation = {
+                        winProbability: winProb,
+                        gammonProbability: winProb * 0.2,
+                        backgammonProbability: winProb * 0.05,
+                        bestMoves,
+                        equity
+                    };
+                }
+            }
+            // Fallback : DeepSeek API (payant)
+            else if (this.deepseek) {
+                const deepSeekEval = await this.deepSeekEvaluationSuperior(position, bestMoves, equity);
+                if (deepSeekEval) {
+                    evaluation = {
+                        winProbability: deepSeekEval.winProbability,
+                        gammonProbability: deepSeekEval.gammonProbability,
+                        backgammonProbability: deepSeekEval.backgammonProbability,
+                        bestMoves: deepSeekEval.bestMoves || bestMoves,
+                        equity: deepSeekEval.equity || equity
+                    };
+                } else {
+                    evaluation = {
+                        winProbability: winProb,
+                        gammonProbability: winProb * 0.2,
+                        backgammonProbability: winProb * 0.05,
+                        bestMoves,
+                        equity
+                    };
+                }
             } else {
+                // Pas d'IA disponible, utiliser heuristique uniquement
                 evaluation = {
                     winProbability: winProb,
                     gammonProbability: winProb * 0.2,
